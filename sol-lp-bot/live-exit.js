@@ -14,7 +14,7 @@ function asPaperPos(pos, v) {
     bins: { onchain: { x: +v.x || 0, y: +v.y || 0 } },
     feeX: +v.fx || 0, feeY: +v.fy || 0,
     quoteMint: pos.quoteMint || SOL,
-    capitalAsset: 'USDC',                       // live capital is USDC -> SOL, same model as the dry run default
+    capitalAsset: pos.capitalAsset === 'SOL' ? 'SOL' : 'USDC',   // PATCH: SOL-capital positions are valued in net SOL (paper-usdc.exitSolQuote), everything else in net USDC
     usdcIn: pos.usdcIn, initialUsdcIn: pos.initialUsdcIn ?? pos.usdcIn,
     rentRefundableSol: pos.rentRefundableSol || 0,
     realizedPnlCarryUsd: pos.realizedPnlCarryUsd || 0,

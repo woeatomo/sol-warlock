@@ -33,7 +33,7 @@ function summarize(state, paperDir) {
   const books = Object.values(state.books || {}), all = books.flatMap((b) => b.history || []);
   const vis = entryPolicy.visible(all, policy), b = books[0] || {}, v = b.virtual || {};
   const totalPnlUsd = all.reduce((a, h) => a + pnlOf(h), 0), visiblePnlUsd = vis.reduce((a, h) => a + pnlOf(h), 0);
-  const free = (+v.usdc || 0) + ((+v.sol || 0) + (+v.capitalSol || 0)) * (+v.lastCapitalSolUsd || 0);
+  const free = (+v.usdc || 0) + (+(v.profitSweep && v.profitSweep.sweptUsdc) || 0) + ((+v.sol || 0) + (+v.capitalSol || 0)) * (+v.lastCapitalSolUsd || 0);
   return { modal: v.totalDepositedUsdc ?? v.usdcStart ?? 0, trades: all.length, visibleTrades: vis.length, archivedTrades: all.length - vis.length,
     totalPnlUsd: +totalPnlUsd.toFixed(6), visiblePnlUsd: +visiblePnlUsd.toFixed(6), equityUsd: +free.toFixed(6), cashUsdc: +(+v.usdc || 0).toFixed(6),
     deposits: (state.capitalDeposits || []).length, calendar: calendar.fromHistory(all, policy), calendarAll: calendar.fromHistory(all, null) };

@@ -14,6 +14,16 @@ Strategi, filter, dan semua default setelan **sama persis** dengan upstream v1.8
 5. **File PM2 ditambahkan:** `ecosystem.public.config.cjs` (dry run + mini app) dan `ecosystem.public-live.config.cjs` (live, dipanggil tombol Live ON). Jangan isi `PAPER`, `DRY_RUN`, `LIVE_CONFIRMED` di `.env`.
 6. Port mini app default `8797` (README upstream menulis 8787).
 
+### Modal SOL + sweep profit bulanan (tambahan fork ini)
+Pilih aset modal **SOL** di menu Live mini app. Setelan ini dipakai dry run dan live.
+- **Tanpa swap USDC↔SOL.** Budget posisi diambil dari SOL bebas (`POSITION_USDC` tetap dalam dolar, dikonversi ke SOL pada harga saat open), buffer gas dari budget yang sama, token hasil close di-swap ke SOL. TP/SL/SL+ dihitung dari net SOL.
+- **Hanya pool ber-quote SOL** yang dibuka (dry run dan live).
+- **Live:** isi wallet dengan SOL. SOL bebas = saldo wallet − cadangan tiap posisi terbuka − 0,05 SOL cadangan fee. USDC di wallet tidak dipakai sebagai modal. Go Live butuh minimal 0,40 SOL.
+- **Sweep bulanan:** pada siklus pertama tiap bulan baru (WIB), profit *terealisasi* dalam SOL dari trade yang ditutup sebelum bulan itu, dikurangi yang sudah di-sweep, di-swap SOL→USDC. Bulan rugi dibawa ke depan (modal SOL tidak ikut di-sweep). Posisi yang masih terbuka baru dihitung saat ditutup. Hanya SOL bebas yang di-swap; sisanya menyusul. Notifikasi dikirim ke Telegram, riwayat ada di `status.json` (`profitSweep`).
+  - `PROFIT_SWEEP_MONTHLY=0` mematikan (default nyala, hanya aktif saat modal SOL). `PROFIT_SWEEP_MIN_SOL` = sweep terkecil (default 0.01).
+  - Di dry run USDC hasil sweep diparkir terpisah dan tetap dihitung sebagai equity; di live USDC-nya tinggal di wallet.
+- **Belum dites on-chain.** Go Live tetap terkunci sampai `sol-capital` dan `profit-sweep` dites dana kecil dan dicatat: `node record-live-verification.js sol-capital "..."`.
+
 ## Fitur
 - Screening pool (fee/TVL, bin step, umur pool, filter pump)
 - SL -20%, TP +20%, TP Emergency +10% (default ON)

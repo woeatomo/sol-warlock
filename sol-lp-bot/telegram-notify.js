@@ -760,7 +760,7 @@ function statusFromState(state, extra = {}) {
   const book = state && state.books && (state.books.N5 || Object.values(state.books)[0]);
   const positions=book?.positions||(book?.position?[book.position]:[]);
   const capitalPx=extra.solUsd||positions[0]?.lastSolUsd||positions[0]?.solUsdEntry||book?.virtual?.lastCapitalSolUsd||book?.virtual?.solDepositBasisPrice||0;
-  const equityUsd=(book?.virtual?.usdc||0)+(book?.virtual?.capitalSol||0)*capitalPx+positions.reduce((n,p)=>{
+  const equityUsd=(book?.virtual?.usdc||0)+(book?.virtual?.profitSweep?.sweptUsdc||0)+(book?.virtual?.capitalSol||0)*capitalPx+positions.reduce((n,p)=>{
     const px=p.lastSolUsd||p.solUsdEntry||0,unit=p.quoteSymbol==='USDC'?1:px;
     const xy=Object.values(p.bins||{}).reduce((r,b)=>({x:r.x+(b.x||0),y:r.y+(b.y||0)}),{x:0,y:0});
     const mark=((xy.x+(p.feeX||0))*(p.lastPrice||p.entryPrice)+(xy.y+(p.feeY||0)))*unit+((p.reserveSol||0)+(p.rentRefundableSol||0))*px;

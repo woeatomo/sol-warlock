@@ -6,12 +6,12 @@ const ROOT = __dirname;
 // Execution infrastructure that may differ between modes (not strategy): mode flags, RPC, fees, polling.
 // Code that sends transactions can only be proven on chain. A feature counts as equal to the dry run only after TUAN records a supervised small live test
 // (node record-live-verification.js <feature> "what was tested + tx signatures"). Writing the code is never enough to open Go Live.
-const REQUIRED_VERIFICATIONS = ['entry-geometry', 'swapback', 'usdc-quoted-pools', 'oor-reposition', 'reshape-compound', 'multi-position'];
+const REQUIRED_VERIFICATIONS = ['entry-geometry', 'swapback', 'usdc-quoted-pools', 'oor-reposition', 'reshape-compound', 'multi-position', 'sol-capital', 'profit-sweep'];   // PATCH: + SOL capital path and monthly sweep
 function verifications(root) { try { return JSON.parse(fs.readFileSync(path.join(root, 'live-verification.json'), 'utf8')).features || {}; } catch (e) { return {}; } }
 const INFRA_OK = new Set(['DRY_RUN', 'PAPER', 'RPC', 'TX_FEE_SOL', 'SLIPPAGE_PCT', 'PRIORITY_MICROLAMPORTS', 'PAPER_USDC', 'PAPER_VIRTUAL_SOL', 'PAPER_DAYS', 'ONCE', 'POLL_SEC', 'POSITION_POLL_SEC']);   // PATCH: POSITION_POLL_SEC is one shared value used by both loops
 // Divergences that exist TODAY and are known (12 Nov 2026). New ones fail the test; fixed ones must be removed from this list.
 const KNOWN_DEBT = [
-  'unverified:entry-geometry', 'unverified:swapback', 'unverified:usdc-quoted-pools', 'unverified:oor-reposition', 'unverified:reshape-compound', 'unverified:multi-position',   // each needs a supervised small live test recorded by Tuan
+  'unverified:entry-geometry', 'unverified:swapback', 'unverified:usdc-quoted-pools', 'unverified:oor-reposition', 'unverified:reshape-compound', 'unverified:multi-position', 'unverified:sol-capital', 'unverified:profit-sweep',   // each needs a supervised small live test recorded by Tuan
 ];
 function block(src, from, toMarker) { const a = src.indexOf(from); if (a < 0) throw Error('marker not found: ' + from); const b = src.indexOf(toMarker, a); if (b < 0) throw Error('end marker not found: ' + toMarker); return src.slice(a, b); }
 function analyse(root = ROOT) {

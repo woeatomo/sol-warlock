@@ -30,4 +30,20 @@ async function swapBack({ pos, pileSol, getToken, swapTokenToUsdc, closeTokenAcc
   out.complete = out.errors.length === 0 || (out.tokenSwapped > 0 || !(tok && tok.raw > 0n)) && (out.solSwapped > 0 || pile <= SOL_DUST);
   return out;
 }
-module.exports = { swapBack, SOL_DUST };
+// PATCH: SOL capital == the dry run's exitSolQuote: the token goes to SOL directly and native SOL is kept (no SOL -> USDC swap).
+// Returns the wallet SOL after the swap; the caller derives the position's SOL out from wallet balances. Signs nothing itself.
+async function swapBackToSol({ getToken, swapTokenToSol, closeTokenAccounts, getSolBalance, sleep = async () => {}, log = () => {}, retries = 3 }) {
+  const out = { tokenSwapped: 0, errors: [] };
+  const attempt = async (name, fn) => { for (let i = 1; i <= retries; i++) { try { return await fn(); } catch (e) { out.errors.push(`${name} #${i}: ${e.message}`); log(`  ${name} failed (${i}/${retries}): ${e.message}`); await sleep(2000); } } return null; };
+  const tok = await getToken();
+  const hadToken = !!(tok && tok.raw > 0n);
+  if (hadToken) {
+    const r = await attempt('token->SOL', async () => { const x = await swapTokenToSol(tok.raw, tok.decimals); if (!x || x.ok === false) throw new Error((x && x.error) || 'swap failed'); return x; });
+    if (r) { out.tokenSwapped = Number(tok.raw); await attempt('close token account', () => closeTokenAccounts(tok)); }
+    await sleep(3000);
+  }
+  out.solAfter = await getSolBalance();
+  out.complete = !hadToken || out.tokenSwapped > 0;
+  return out;
+}
+module.exports = { swapBack, swapBackToSol, SOL_DUST };

@@ -21,6 +21,7 @@ const ARM_TTL_MS = 60 * 1000;
 const LIVE_INITDATA_MAX_AGE_SEC = 5 * 60;
 const MIN_LIVE_SOL = 0.05; // fee reserve so the wallet can still pay txs
 const MIN_LIVE_USDC = 10;
+const MIN_LIVE_CAPITAL_SOL = 0.35;   // PATCH: SOL capital needs at least one gas buffer (0.3) plus a little to deposit, on top of the fee reserve
 const LIVE_SOL_RESERVE = 0.05;
 
 function wib(d = new Date()) {
@@ -133,16 +134,21 @@ async function defaultGetBalances(address, rpc) {
   return { sol, usdc };
 }
 
-function evaluateBalances({ sol, usdc, minSol = MIN_LIVE_SOL, minUsdc = MIN_LIVE_USDC } = {}) {
+function evaluateBalances({ sol, usdc, minSol = MIN_LIVE_SOL, minUsdc = MIN_LIVE_USDC, capitalAsset = 'USDC' } = {}) {
   const reasons = [];
+  // PATCH: with SOL capital the position money is SOL, so no USDC is required; the wallet needs the fee reserve plus a minimum of SOL capital.
+  if (capitalAsset === 'SOL') { minUsdc = 0; if (!(sol >= minSol + MIN_LIVE_CAPITAL_SOL)) reasons.push(`SOL ${sol ?? 0} < minimum ${(minSol + MIN_LIVE_CAPITAL_SOL).toFixed(2)} (cadangan fee + modal posisi SOL)`); }
+  else {
   if (!(sol >= minSol)) reasons.push(`SOL ${sol ?? 0} < minimum ${minSol} (cadangan fee)`);
   if (!(usdc >= minUsdc)) reasons.push(`USDC ${usdc ?? 0} < minimum ${minUsdc} (modal posisi)`);
+  }
   return {
     ok: reasons.length === 0,
     sol: +sol || 0,
     usdc: +usdc || 0,
     minSol,
     minUsdc,
+    capitalAsset,
     reasons,
   };
 }
@@ -194,7 +200,7 @@ async function liveSnapshot(opts = {}) {
     try {
       const getBal = opts.getBalances || defaultGetBalances;
       balances = await getBal(meta.publicAddress, opts.rpc);
-      check = evaluateBalances({ sol: balances.sol, usdc: balances.usdc, minSol: opts.minSol, minUsdc: opts.minUsdc });
+      check = evaluateBalances({ sol: balances.sol, usdc: balances.usdc, minSol: opts.minSol, minUsdc: opts.minUsdc, capitalAsset: opts.capitalAsset === 'SOL' ? 'SOL' : 'USDC' });
     } catch (e) {
       check = { ok: false, reasons: ['balance read failed'] };
     }
@@ -211,7 +217,8 @@ async function liveSnapshot(opts = {}) {
     usdc: balances.usdc,
     balanceCheck: check,
     minSol: check.minSol || MIN_LIVE_SOL,
-    minUsdc: check.minUsdc || MIN_LIVE_USDC,
+    minUsdc: check.minUsdc ?? MIN_LIVE_USDC,
+    capitalAsset: check.capitalAsset || 'USDC',
     liveSolReserve: LIVE_SOL_RESERVE,
   };
 }

@@ -47,6 +47,8 @@ const entryCost=require('./paper-entry-cost');
 const strategy=require('./paper-strategy');
 const entryPolicy=require('./paper-entry-policy');
 const capitalAsset=require('./paper-capital-asset');
+const profitSweep=require('./profit-sweep');   // PATCH: monthly realised SOL profit -> USDC (SOL capital only)
+const solCapital=require('./sol-capital');   // PATCH: SOL-capital sizing shared by dry run and live
 const swapRoute=require('./swap-route-config');
 const paperReconcile=require('./paper-reconcile');
 const slBlacklist=require('./paper-sl-blacklist');
@@ -905,7 +907,7 @@ function bookStats(book, v, live = null, solUsdPx = 0) {
   const leftoverSol=positions.reduce((n,p)=>n+(p.reserveSol||0),+(book.virtual?.sol||0));
   const marked=p=>markValue(p.bins,p.lastPrice||p.entryPrice,p.feeX||0,p.feeY||0)*paperUsdc.quoteUsd(p,solUsdPx)+((p.reserveSol||0)+(p.rentRefundableSol||0))*(p.lastSolUsd||solUsdPx);
   const positionValueUsd=positions.reduce((n,p)=>n+(p.lastLive?.exitUsdc??p.lastExitUsdc??marked(p)),0);
-  const equityUsd=usdc+positionValueUsd+(+(book.virtual?.sol||0)+ +(book.virtual?.capitalSol||0))*solUsdPx;
+  const equityUsd=usdc+positionValueUsd+(+(book.virtual?.sol||0)+ +(book.virtual?.capitalSol||0))*solUsdPx+ +(book.virtual?.profitSweep?.sweptUsdc||0);   // PATCH: swept profit (USDC) stays part of equity
   const equitySol=solUsdPx?equityUsd/solUsdPx:0;
   const totalDepositedUsdc=book.virtual?.totalDepositedUsdc??book.virtual?.usdcStart??CFG.PAPER_USDC;
   return {
@@ -1290,8 +1292,9 @@ async function paperOpenAll(p,state,opts={}) {
  if(multi.positions(book).length>=CFG.MAX_POSITIONS)return {skipped:'Slot penuh'};
  if(multi.duplicate(book,p.address,p.token_x?.address))return {skipped:'Token (CA) atau pool sudah dibuka'};
  if((book.virtual.capitalAsset||'USDC')==='SOL'){
+  if(!solCapital.quoteAllowed('SOL',p.token_y?.address))return {skipped:'modal SOL: hanya pool ber-quote SOL'};   // PATCH: same rule as live
   const px=await solUsd(),cash=book.virtual.capitalSol||0,slots=CFG.MAX_POSITIONS-book.positions.length;
-  const allocation=CFG.POSITION_USDC>0?(cash+1e-12>=CFG.POSITION_USDC/px?CFG.POSITION_USDC/px:0):cash/slots;
+  const allocation=solCapital.allocation({cash,positionUsd:CFG.POSITION_USDC,px,slots});
   if(!(allocation>0)||!(px>0))return {skipped:'Saldo SOL tidak cukup untuk budget'};
   const leg={...book,positions:undefined,position:null,virtual:{...book.virtual,usdc:allocation*px,sol:0,capitalSol:0}};
   const result=await paperOpenSingle(p,{...state,books:{[VARIANTS[0].id]:leg}},{...opts,capitalAsset:'SOL',positionBudgetSol:allocation,silent:true});
@@ -1797,9 +1800,28 @@ function exitQuotePriority(p){
  if(active>=p.maxBinId-1||(Number.isFinite(pct)&&pct>=tpEff-1))return 1;
  return 0;
 }
+// PATCH: monthly profit sweep in the dry run. Free SOL -> USDC at a Jupiter quote; the USDC is parked in virtual.profitSweep (never re-used as capital).
+async function paperProfitSweep(state){
+ if(!profitSweep.enabled()||Date.now()<(paperProfitSweep.retryAt||0))return null;
+ const book=primaryBook(state);if(!book||!book.virtual||(book.virtual.capitalAsset||'USDC')!=='SOL')return null;
+ if(profitSweep.init(book.virtual,now()))saveState(state,F('state.json'));
+ const sw=book.virtual.profitSweep,pl=profitSweep.plan({history:book.history||[],sweep:sw,freeSol:book.virtual.capitalSol||0,nowMs:Date.now()});
+ if(!pl.due)return null;
+ try{
+  const px=await solUsd(),q=await capitalAsset.exchange(pl.amount,'SOL','USDC',px,jupiterQuote,CFG.TX_FEE_SOL);
+  book.virtual.capitalSol=Math.max(0,(book.virtual.capitalSol||0)-pl.amount);
+  const e=profitSweep.record(sw,{at:now(),month:pl.month,sol:pl.amount,usdc:q.out,solUsd:px,mode:'paper'});
+  saveState(state,F('state.json'));
+  const line=`PROFIT SWEEP PAPER ${e.month}: ${e.sol.toFixed(6)} SOL -> ${e.usdc.toFixed(2)} USDC (${q.basis}); realised to date ${pl.realized.toFixed(6)} SOL, still pending ${(pl.pending-pl.amount).toFixed(6)} SOL, free SOL ${book.virtual.capitalSol.toFixed(6)}`;
+  log(line);try{paperSettings.audit(PAPER_DIR,'action='+line);}catch{/* audit optional */}
+  try{telegram.send(`💵 ${line}`).catch(()=>{});}catch{/* notify optional */}
+  return e;
+ }catch(e){paperProfitSweep.retryAt=Date.now()+3600_000;log('profit sweep (paper) failed, retry in 1 h: '+e.message);return null;}
+}
 async function paperCycle(state) {
  applyPaperSettings();
  await processPaperRequests(state);
+ try{await paperProfitSweep(state);}catch(e){log('profit sweep (paper) error: '+e.message);}
  const parent=primaryBook(state);multi.migrate(parent);reconcileEntryCosts(state);
  const meta=paperMeta(state),ended=Date.now()>=Date.parse(meta.endsAt);
  const stop=paperStopRequested()||ended,reasonStop=ended?'paper 7d window ended':'paper STOP';
@@ -1872,7 +1894,7 @@ async function paperCycle(state) {
   state.lastScan={...scan.last,openResults:[]};state.nextEntryRetryAt=null;
   if(!stop&&!parent.positions.some(p=>exitQuotePriority(p)>=4)){
    const preferred=(parent.virtual.capitalAsset||'USDC')==='SOL'?SOL:USDC,eligible=scan.picks.filter(p=>!multi.duplicate(parent,p.address,p.token_x?.address));
-   const picks=eligible.some(p=>p.token_y?.address===preferred)?eligible.filter(p=>p.token_y?.address===preferred):eligible;
+   const picks=preferred===SOL?eligible.filter(p=>p.token_y?.address===SOL):eligible.some(p=>p.token_y?.address===preferred)?eligible.filter(p=>p.token_y?.address===preferred):eligible;   // PATCH: SOL capital opens SOL-quoted pools only (same as live)
    for(const p of picks){
     if(parent.positions.length>=CFG.MAX_POSITIONS)break;
     if(multi.duplicate(parent,p.address,p.token_x?.address))continue;
@@ -1949,6 +1971,7 @@ async function liveOpen(p, state, opts = {}) {
   if (!(px > 0)) return { skipped: 'sol usd unavailable' };
   const usdcBal = await liveUsdcBal(wallet.publicKey);
   const solBal = await realSolBal(wallet.publicKey);
+  if ((opts.capitalAsset || CFG.CAPITAL_ASSET || 'USDC') === 'SOL') return liveOpenSolCapital({ p, state, opts, policy, dlmm, active, binStep, plan, priceUi, rentRef, rentNon, px, solBal });   // PATCH: SOL capital, no USDC swap
   if (p.token_y?.address === USDC) return liveOpenUsdcPool({ p, state, opts, policy, dlmm, active, binStep, plan, priceUi, rentRef, rentNon, px, usdcBal, solBal });   // USDC-quoted pool: same plan as paperOpenUsdc
   const gasPlan = paperCap.computeGasBufferSol({
     rentRefundable: rentRef, rentNonRefundable: rentNon, txFee: CFG.TX_FEE_SOL, floor: CFG.GAS_BUFFER_SOL,
@@ -2023,6 +2046,69 @@ async function liveOpenUsdcPool({ p, state, opts, policy, dlmm, active, binStep,
   return { opened: true, complete: dep.complete, usdcPool: true, width: plan.width, wide: plan.wide };
 }
 
+// PATCH: SOL capital in live == the dry run's SOL mode (paperOpenMulti + paperOpenSingle with capitalAsset 'SOL'): the budget is the wallet's
+// free SOL, there is no USDC <-> SOL swap, the gas buffer comes out of the same budget, and only SOL-quoted pools are opened.
+async function liveOpenSolCapital({ p, state, opts, policy, dlmm, active, binStep, plan, priceUi, rentRef, rentNon, px, solBal }) {
+  if (!solCapital.quoteAllowed('SOL', p.token_y?.address)) return { skipped: 'modal SOL: hanya pool ber-quote SOL' };
+  const { minBinId, maxBinId } = plan, openFees = 2 * CFG.TX_FEE_SOL, open = livePositions.list(state);
+  const gas = paperCap.computeGasBufferSol({ rentRefundable: rentRef, rentNonRefundable: rentNon, txFee: CFG.TX_FEE_SOL, floor: policy.GAS_BUFFER_SOL ?? CFG.GAS_BUFFER_SOL });
+  const free = solCapital.freeSol({ walletSol: solBal, positions: open, minReserve: liveControl.MIN_LIVE_SOL, except: state.__active });
+  let budget = opts.positionBudgetSol ?? solCapital.allocation({ cash: free, positionUsd: CFG.POSITION_USDC, px, slots: CFG.MAX_POSITIONS - open.length });
+  if (opts.positionBudgetSol != null && budget > free && free >= budget * 0.9) budget = free;   // a reposition leg may be a hair short after real network fees: use what is really there
+  const sp = solCapital.planOpen({ budget, extraSol: gas.buffer, capSol: ((p.tvl || 0) * ((policy.MAX_POSITION_TVL_PCT ?? 5) / 100)) / px, allocate: paperCap.allocateOpenSol, costs: { rentRef, rentNon, openFees } });
+  log(`open plan ${p.name} (SOL capital): bins ${minBinId}..${maxBinId}, walletSOL=${solBal.toFixed(4)} freeSOL=${free.toFixed(4)} budget=${(budget || 0).toFixed(4)} gasBuffer=${gas.buffer.toFixed(4)}${sp.ok ? ` deposit=${sp.deposit.toFixed(4)} reserve=${sp.reserve.toFixed(4)}` : ' SKIP ' + sp.why}`);
+  if (!sp.ok) return { skipped: sp.why };
+  if (budget > free + 1e-9) return { skipped: 'Saldo SOL bebas tidak cukup untuk budget', free, budget };
+  if (CFG.DRY_RUN) return { dry: true, skipped: 'dry-run does not open a live position; use PAPER=1 for paper trades or Go Live from the mini app' };
+  const posKp = Keypair.generate(), usdMark = budget * px;
+  const recordPosition = () => {
+    state.position = { pool: p.address, name: p.name, mintX: p.token_x.address, decX: p.token_x.decimals, position: posKp.publicKey.toBase58(), minBinId, maxBinId, openedAt: now(), entryPrice: priceUi, depositSol: sp.deposit, sizeWant: sp.want, tvlCapped: sp.capped, walletBefore: solBal, usdcIn: usdMark, solBought: 0, gasBufferSol: gas.buffer, stage: 'spot', rentPaidSol: rentRef + rentNon, rentRefundableSol: rentRef,
+      tvlUsd: p.tvl, binStep, entryActiveBin: active.binId, capitalAsset: 'SOL', capitalInSol: budget, initialCapitalInSol: budget, quoteMint: SOL, quoteSymbol: 'SOL', quoteDecimals: 9, initialUsdcIn: usdMark, leftoverSol: sp.reserve, entrySolUsd: px,
+      baseFeePct: p.pool_config?.base_fee_pct ?? p.pool_config?.base_fee_percentage ?? null, strategySettings: opts.strategySettings || strategy.snapshot(CFG), openSource: opts.source || 'scan' };
+    Object.assign(state.position, { spotSol: sp.deposit * plan.split, bidaskSol: sp.deposit * (1 - plan.split), upperBufferBins: plan.upper, nBins: plan.width, origMinBinId: minBinId, origMaxBinId: maxBinId, shape: 'open-' + String(policy.OPEN_SHAPE || 'MIXED').toLowerCase() });
+  };
+  const dep = await liveOpenExec.openDeposit({
+    dlmm, plan, actualSol: sp.deposit, posKp, wallet, send, BN, StrategyType, lamports: LAMPORTS_PER_SOL, slippage: CFG.SLIPPAGE_PCT, log,
+    onCreated: async ({ update }) => { if (!update) recordPosition(); saveState(state, path.join(DIR, 'state.json')); },
+  });
+  if (dep.complete) state.position.stage = 'full';
+  else {   // the part that never reached the pool is still this position's SOL: keep it in its reserve so the close accounts for it
+    const done = dep.depositedLamports / LAMPORTS_PER_SOL;
+    state.position.leftoverSol = (state.position.leftoverSol || 0) + Math.max(0, sp.deposit - done);
+    state.position.depositSol = done; state.position.spotSol = Math.min(state.position.spotSol, done); state.position.bidaskSol = Math.max(0, done - state.position.spotSol);
+  }
+  // The position owns exactly its budget minus what really left the wallet (deposit + rent + real network fees), so the close is accounted to the lamport.
+  try { await sleep(2000); const spent = solBal - await realSolBal(wallet.publicKey), exact = budget - spent; if (Number.isFinite(exact) && exact >= 0 && Math.abs(exact - state.position.leftoverSol) < 0.05) state.position.leftoverSol = exact; else log(`  open reserve check: planned ${state.position.leftoverSol.toFixed(6)} SOL kept (measured ${Number.isFinite(exact) ? exact.toFixed(6) : 'n/a'})`); } catch (e) { log('  open reserve check skipped: ' + e.message); }
+  saveState(state, path.join(DIR, 'state.json'));
+  return { opened: true, complete: dep.complete, solCapital: true, capitalInSol: budget, width: plan.width, wide: plan.wide };
+}
+
+// PATCH: monthly profit sweep in live. Realised SOL profit of trades closed before this month, minus what was already swept, goes SOL -> USDC.
+// Only SOL that no open position owns is used, and the network-fee reserve always stays.
+async function liveProfitSweep(state) {
+  if (!profitSweep.enabled() || (CFG.CAPITAL_ASSET || 'USDC') !== 'SOL' || Date.now() < (liveProfitSweep.retryAt || 0)) return null;
+  if (profitSweep.init(state, now())) saveState(state, path.join(DIR, 'state.json'));
+  const quick = profitSweep.plan({ history: state.history || [], sweep: state.profitSweep, freeSol: Infinity, nowMs: Date.now() });
+  if (!(quick.pending >= profitSweep.minSol())) return null;   // nothing to sweep: no RPC call
+  if (CFG.DRY_RUN || CFG.PAPER || process.env.LIVE_CONFIRMED !== '1') return null;
+  try {
+    const solBal = await realSolBal(wallet.publicKey);
+    const free = solCapital.freeSol({ walletSol: solBal, positions: livePositions.list(state), minReserve: liveControl.MIN_LIVE_SOL + 0.003 });
+    const pl = profitSweep.plan({ history: state.history || [], sweep: state.profitSweep, freeSol: free, nowMs: Date.now() });
+    if (!pl.due) return null;
+    const usdcBefore = await liveUsdcBal(wallet.publicKey), px = await solUsd();
+    const sw = await jupiterSwapLive(SOL, USDC, BigInt(Math.floor(pl.amount * 1e9)), 9, 6, 'monthly-profit-sweep');
+    if (!sw.ok || sw.dry) throw new Error(sw.error || 'swap not executed');
+    await sleep(3000);
+    const got = (await liveUsdcBal(wallet.publicKey)) - usdcBefore, usdc = got > 0 ? got : sw.outUi;
+    const e = profitSweep.record(state.profitSweep, { at: now(), month: pl.month, sol: pl.amount, usdc, solUsd: px, mode: 'live', sig: sw.sig });
+    saveState(state, path.join(DIR, 'state.json'));
+    const line = `PROFIT SWEEP LIVE ${e.month}: ${e.sol.toFixed(6)} SOL -> ${e.usdc.toFixed(2)} USDC; realised to date ${pl.realized.toFixed(6)} SOL, still pending ${(pl.pending - pl.amount).toFixed(6)} SOL`;
+    log(line); try { telegram.send(`💵 ${line}`).catch(() => {}); } catch { /* notify optional */ }
+    return e;
+  } catch (e) { liveProfitSweep.retryAt = Date.now() + 3600_000; log('profit sweep (live) failed, retry in 1 h: ' + e.message); return null; }
+}
+
 async function liveValuation(pos) {
   const dlmm = await getDlmm(pos.pool);
   const p = await dlmm.getPosition(new PublicKey(pos.position));
@@ -2068,15 +2154,30 @@ async function liveClose(state, reason, opts = {}) {
   for (const [i, tx] of txs.entries()) await send(tx, [wallet], `remove-claim-close ${i + 1}/${txs.length}`);
   await sleep(3000);
   const receivedSol = (await realSolBal(wallet.publicKey)) - solBeforeRemove;   // quote side (SOL pools) + refunded rent - close fees
+  const getToken = async () => { const accs = await conn.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(pos.mintX) }); const raw = accs.value.reduce((t, a) => t + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); return { raw, decimals: accs.value[0]?.account.data.parsed.info.tokenAmount.decimals ?? pos.decX, accounts: accs.value }; };
+  const closeTokenAccounts = async tok => { for (const a of tok.accounts) await send(new Transaction().add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey, [], a.account.owner)), [wallet], 'close-ata'); };
+  if (pos.capitalAsset === 'SOL') {
+    // PATCH: SOL capital == the dry run's exitSolQuote: token -> SOL directly, native SOL stays SOL. SOL out = this position's reserve + everything the wallet gained since just before the removal.
+    const sbs = await liveCloseExec.swapBackToSol({ sleep, log, getToken, closeTokenAccounts, getSolBalance: () => realSolBal(wallet.publicKey), swapTokenToSol: (raw, dec) => jupiterSwapLive(pos.mintX, SOL, raw, dec, 9, 'token-to-sol-close') });
+    if (!sbs.complete) log('  ERROR token swap back incomplete, the token stays in the wallet: ' + sbs.errors.join(' | '));
+    const res = solCapital.closeResult({ pos, solOut: Math.max(0, (pos.leftoverSol || 0) + (sbs.solAfter - solBeforeRemove)), px: await solUsd() });
+    log(`  SOL out ${res.solOut.toFixed(6)} for ${pos.capitalInSol.toFixed(6)} in: ${res.pnlCapital.toFixed(6)} SOL (${res.pnlPct.toFixed(3)}%); wallet SOL ${sbs.solAfter.toFixed(4)}`);
+    if (!opts.intermediate && slBlacklist.isStopLoss(reason)) { try { if (slBlacklist.add(PAPER_DIR, { mint: pos.mintX, symbol: pos.name, pool: pos.pool, reason, closedAt: now(), source: 'auto' })) log('SL blacklist add ' + pos.name + ' ' + pos.mintX); } catch (e) { log('SL blacklist add failed: ' + e.message); } }
+    const rowSol = { ...pos, closedAt: now(), reason, estPnlPct: +(v.pnl * 100).toFixed(2), estValueSol: +v.value.toFixed(5), feesSol: +v.fees.toFixed(5), realizedSol: +res.pnlCapital.toFixed(6), capitalAsset: 'SOL', capitalInSol: pos.capitalInSol, initialCapitalInSol: pos.initialCapitalInSol || pos.capitalInSol, solOut: res.solOut,
+      usdcIn: pos.initialUsdcIn || pos.usdcIn, usdcOut: res.usdcOut, legUsdcIn: pos.usdcIn, legUsdcOut: res.usdcOut, pnlUsd: res.pnlUsd, pnlPct: res.pnlPct, netPnlUsd: res.pnlUsd, netPnlPct: res.pnlPct, netPnlSol: res.pnlCapital, pnlCapital: res.pnlCapital, pnlCapitalPct: res.pnlPct, swapBackComplete: sbs.complete, swapBackErrors: sbs.errors };
+    if (!opts.intermediate) { state.history.push(rowSol); state.position = null; saveState(state, path.join(DIR, 'state.json')); }
+    log(`  closed${opts.intermediate ? ' (reposition leg)' : ''}. wallet ${sbs.solAfter.toFixed(4)} SOL`);
+    return { solOut: res.solOut, usdcOut: res.usdcOut, row: rowSol };
+  }
   // Swap back exactly like the dry run (paper-usdc.exitQuote): token -> USDC directly, then the position's whole SOL pile -> USDC.
   const sb = await liveCloseExec.swapBack({
     pos, sleep, log, pileSol: (pos.quoteMint === USDC ? 0 : 0) + Math.max(0, (pos.leftoverSol || 0) + receivedSol),
     getUsdcBalance: () => liveUsdcBal(wallet.publicKey),
     getSolBalance: () => realSolBal(wallet.publicKey),
-    getToken: async () => { const accs = await conn.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(pos.mintX) }); const raw = accs.value.reduce((t, a) => t + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); return { raw, decimals: accs.value[0]?.account.data.parsed.info.tokenAmount.decimals ?? pos.decX, accounts: accs.value }; },
+    getToken,
     swapTokenToUsdc: (raw, dec) => jupiterSwapLive(pos.mintX, USDC, raw, dec, 6, 'token-to-usdc-close'),
     swapSolToUsdc: raw => jupiterSwapLive(SOL, USDC, raw, 9, 6, 'sol-pile-to-usdc-close'),
-    closeTokenAccounts: async tok => { for (const a of tok.accounts) await send(new Transaction().add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey, [], a.account.owner)), [wallet], 'close-ata'); },
+    closeTokenAccounts,
   });
   if (!sb.complete) log('  ERROR swap back incomplete, leftover stays in the wallet: ' + sb.errors.join(' | '));
   const after = await realSolBal(wallet.publicKey);
@@ -2130,6 +2231,7 @@ async function writeLiveStatusPointer(state, extra = {}) {
     } : (root.paperRun || null),
     lastScan: CFG.PAPER ? undefined : (state.lastScan || root.lastScan),
     closedTrades: root.closedTrades || [],
+    profitSweep: state.profitSweep || root.profitSweep || null,   // PATCH
     totalRealizedSol: root.totalRealizedSol,
     ...extra,
   };
@@ -2161,6 +2263,7 @@ async function writePaperStatus(state, extra = {}) {
     },
     meta: state.meta,
     strategy: VARIANTS[0] && { id: VARIANTS[0].id, n: VARIANTS[0].n, reshape: VARIANTS[0].reshape, compound: VARIANTS[0].compound },
+    profitSweep: primaryBook(state)?.virtual?.profitSweep || null,   // PATCH
     positions: multi.positions(primaryBook(state)).map(publicPos),
     openCount:multi.positions(primaryBook(state)).length,maxPositions:CFG.MAX_POSITIONS,
     position: publicPos(multi.positions(primaryBook(state))[0]),
@@ -2227,6 +2330,7 @@ async function livePositionCycle(state, stop) {
       const pollId = state.livePollSequence = (state.livePollSequence || 0) + 1;
       const r = await liveExit.decideLiveExit({ pos: state.position, v, pxUsd: await solUsd(), quote: jupiterQuote, txFee: CFG.TX_FEE_SOL, CFG, pollId });
       live.pnlUsdcPct = +r.val.pnlPct.toFixed(2); live.pnlUsd = +r.val.pnlUsd.toFixed(2); live.quoted = !!r.val.quoted;
+      if (state.position.capitalAsset === 'SOL') { live.capitalAsset = 'SOL'; live.pnlCapitalSol = +(+r.val.pnlCapital).toFixed(6); live.pnlCapitalPct = +r.val.pnlPct.toFixed(2); }   // PATCH: for SOL capital pnlPct is net SOL
       exitReason = r.reason; decisionVal = r.val; state.position.lastLive = { pnlPct: live.pnlUsdcPct };
     } catch (e) { log('exit decision error (position held, retry next poll): ' + e.message); }
     if (exitReason === 'oor_right_reposition') {
@@ -2280,6 +2384,7 @@ async function liveCycle(state) {
     catch (e) { log(`position cycle error ${pos.name} (held, retry next poll): ${e.message}`); }
   }
   saveState(state, path.join(DIR, 'state.json'));
+  try { await liveProfitSweep(state); } catch (e) { log('profit sweep (live) error: ' + e.message); }   // PATCH
   if (state.positions.length) await writeLiveStatusPointer(state, { live: lives[0], lives });
   if (stop) { if (state.positions.length) return false; log('STOP file present, no position -> exiting'); await writeLiveStatusPointer(state); return true; }   // exit only when flat
   if (noNew) {
@@ -2296,7 +2401,8 @@ async function liveCycle(state) {
   const picks = await scan();
   state.lastScan = { at: now(), fetched: scan.last?.fetched, basic: scan.last?.basic, rejects: scan.last?.rejects || null, candidates: picks.map((p) => ({ name: p.name, address: p.address, ftWindow: CFG.FT_WINDOW, ft: feeTvl(p), ft30m: feeTvl(p, '30m'), ft1h: feeTvl(p, '1h'), tvl: p.tvl, binStep: p.pool_config.bin_step, pump1h: p.pump1h, pump24h: p.pump24h, top10: p.top10 })) };
   if (!picks.length) log('no candidate passes all filters');
-  const sel = livePositions.selectPicks({ picks, positions: state.positions, max: CFG.MAX_POSITIONS, preferredMint: USDC });   // capital is USDC: prefer USDC-quoted pools when any exist, like the paper cycle
+  const capSol = (CFG.CAPITAL_ASSET || 'USDC') === 'SOL';   // PATCH: SOL capital opens SOL-quoted pools only; USDC capital prefers USDC-quoted pools when any exist (both like the paper cycle)
+  const sel = livePositions.selectPicks({ picks: capSol ? picks.filter(p => p.token_y?.address === SOL) : picks, positions: state.positions, max: CFG.MAX_POSITIONS, preferredMint: capSol ? SOL : USDC });
   state.lastScan.openResults = [];
   for (const p of sel.chosen) {
     if (state.positions.length >= CFG.MAX_POSITIONS) break;

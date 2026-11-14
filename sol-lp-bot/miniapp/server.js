@@ -17,6 +17,7 @@ const tokenRent = require('../token-rent');
 // Tuan rule: live must equal dry run. Go Live (arm/start) is refused while the parity check finds any difference (fails closed if the check itself errors).
 // ---- token account rent (read-only scan + guarded claim). Never automatic; the claim only runs from an authenticated POST with an explicit phrase.
 // Mints the live bot still holds positions in (any side): their token accounts are never closed, even when momentarily empty.
+function liveCapitalAsset(paperDir) { try { return settings.currentValues(paperDir).CAPITAL_ASSET === 'SOL' ? 'SOL' : 'USDC'; } catch { return 'USDC'; } }
 function liveProtectedMints(opts) {
   if (opts.protectedMintsFn) return new Set(opts.protectedMintsFn());
   const set = new Set();
@@ -284,7 +285,7 @@ function createApp(opts = {}) {
       }
       if (pathname === '/api/live') {
         const snap = await liveControl.liveSnapshot({
-          secretsDir, stopPath, noNewPath,
+          secretsDir, stopPath, noNewPath, capitalAsset: liveCapitalAsset(paperDir),   // PATCH: balance preflight follows the capital asset
           getBalances: opts.getBalances,
           liveStatusFn: opts.liveStatusFn,
           rpc: opts.rpc,
@@ -447,7 +448,7 @@ function createApp(opts = {}) {
       if (pathname === '/api/live/arm') {
         { const par = (opts.parityFn || liveParityDifferences)(); if (par.length) return send(res, 400, { ok: false, error: 'live belum sama dengan dry run; Go Live ditolak', differences: par }); }
         const snap = await liveControl.liveSnapshot({
-          secretsDir, stopPath, noNewPath,
+          secretsDir, stopPath, noNewPath, capitalAsset: liveCapitalAsset(paperDir),   // PATCH: balance preflight follows the capital asset
           getBalances: opts.getBalances,
           liveStatusFn: opts.liveStatusFn,
           rpc: opts.rpc,
@@ -470,7 +471,7 @@ function createApp(opts = {}) {
         if (!used.ok) return send(res, 400, { ok: false, error: used.reason });
         // Second balance check right before start
         const snap = await liveControl.liveSnapshot({
-          secretsDir, stopPath, noNewPath,
+          secretsDir, stopPath, noNewPath, capitalAsset: liveCapitalAsset(paperDir),   // PATCH: balance preflight follows the capital asset
           getBalances: opts.getBalances,
           liveStatusFn: opts.liveStatusFn,
           rpc: opts.rpc,

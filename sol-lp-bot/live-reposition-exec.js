@@ -15,16 +15,18 @@ function carryFields(old, leg, pos, number, pxUsd) {
     openContext: old.openContext, openSource: old.openSource, openReason: old.openReason,
     initialEntryQuoteAmount: old.initialEntryQuoteAmount || old.entryQuoteAmount || old.depositSol,
   };
+  if (old.capitalAsset === 'SOL') { set.initialCapitalInSol = old.initialCapitalInSol || old.capitalInSol; set.realizedPnlCarrySol = (old.realizedPnlCarrySol || 0) + leg.solOut - old.capitalInSol; }   // PATCH: same carry as paperRepositionRight
   for (const k of ['peakPnlCapital', 'peakPnlUsd', 'peakPnlPctUsdc', 'peakPnlAt']) if (old[k] != null) set[k] = old[k];
   Object.assign(pos, set); return set;
 }
 async function reposition({ state, val, settings, pxUsd, deps }) {
   const old = state.position, number = (old.rightRepositions || 0) + 1, { log = () => {}, now = () => new Date().toISOString() } = deps;
+  const solCap = old.capitalAsset === 'SOL';   // PATCH: SOL capital repositions with the leg's SOL, never through USDC
   let pool;
   try {
     pool = await deps.fetchPool(old.pool);
     const bad = deps.sanityReason(pool, settings.MIN_LIQ_USD); if (bad) throw new Error(bad);
-    if (!(Math.max(0, val.usdcOut) > 1)) throw new Error('Proceeds too small to reposition');
+    if (solCap ? !(Math.max(0, val.solOut) > 0.01) : !(Math.max(0, val.usdcOut) > 1)) throw new Error('Proceeds too small to reposition');
   } catch (e) {
     old.repositionRetryCount = (old.repositionRetryCount || 0) + 1; old.repositionRetryAt = now();
     old.repositionRetryError = String(e.message).replace(/https?:\/\/\S+/g, '[endpoint]').slice(0, 160);
@@ -32,18 +34,18 @@ async function reposition({ state, val, settings, pxUsd, deps }) {
     return { done: false, deferred: true };
   }
   const leg = await deps.closeLeg(state);                       // intermediate close: no history row, position object stays until replaced
-  const proceeds = Math.max(0, leg.usdcOut);
+  const proceeds = Math.max(0, solCap ? leg.solOut : leg.usdcOut);
   state.position = null;
   let opened = null;
-  try { opened = await deps.openNew(pool, { source: 'reposition', strategySettings: old.strategySettings, positionBudgetUsdc: proceeds }); }
+  try { opened = await deps.openNew(pool, { source: 'reposition', strategySettings: old.strategySettings, capitalAsset: solCap ? 'SOL' : 'USDC', ...(solCap ? { positionBudgetSol: proceeds } : { positionBudgetUsdc: proceeds }) }); }
   catch (e) { log('reposition reopen error: ' + e.message); }
   if (!state.position) {                                         // the leg is already closed on chain: it becomes an ordinary close, never a lost trade
     const row = { ...leg.row, reason: 'oor_right_reposition_failed_reopen' };
-    state.history.push(row); log(`ERROR reposition ${old.name}: reopen failed after the leg closed (${opened?.skipped || opened?.error || 'no position'}); recorded as a normal close, cash is USDC`);
+    state.history.push(row); log(`ERROR reposition ${old.name}: reopen failed after the leg closed (${opened?.skipped || opened?.error || 'no position'}); recorded as a normal close, cash is ${solCap ? 'SOL' : 'USDC'}`);
     return { done: true, reopened: false, row };
   }
   const set = carryFields(old, leg, state.position, number, pxUsd);
-  log(`REPOSITION KANAN #${number} ${old.name}: range ${state.position.minBinId}..${state.position.maxBinId}; carryPnL=${set.realizedPnlCarryUsd.toFixed(4)} USDC`);
+  log(`REPOSITION KANAN #${number} ${old.name}: range ${state.position.minBinId}..${state.position.maxBinId}; carryPnL=${solCap ? set.realizedPnlCarrySol.toFixed(6) + ' SOL' : set.realizedPnlCarryUsd.toFixed(4) + ' USDC'}`);
   return { done: true, reopened: true, number, set };
 }
 module.exports = { reposition, carryFields };
