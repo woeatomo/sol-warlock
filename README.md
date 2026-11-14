@@ -4,6 +4,8 @@ Bot LP otomatis untuk Meteora DLMM. Default-nya mode PAPER (simulasi, tanpa uang
 
 
 ## ⚠️ Versi patched di atas v1.8 (14 Nov 2026)
+Fork dari [sicknature-x/Sol-Warlock-Meteora-LP-Bot](https://github.com/sicknature-x/Sol-Warlock-Meteora-LP-Bot) (upstream v1.8).
+
 Strategi, filter, dan semua default setelan **sama persis** dengan upstream v1.8. Yang diubah hanya biaya, kejujuran dry run, dan operasional:
 1. **Fee developer 0,5% dibuang.** Upstream memotong 50 bps di setiap swap live ke akun yang disamarkan base64; dry run tidak kena. Sekarang tanpa fee. Opsional `OWNER_FEE_BPS` + `OWNER_FEE_WALLET` (kosong = mati, maks 100 bps), berlaku sama di dry run dan live.
 2. **Jeda cek posisi dry run = live:** `POSITION_POLL_SEC` (default 30 detik). Scan kandidat tetap `POLL_SEC` (300). Upstream: dry run ~10 detik, live 300 detik.
@@ -46,8 +48,8 @@ Pastikan `node -v` menunjukkan v22 atau lebih.
 ## 3. Download dari GitHub
 
     cd ~
-    git clone https://github.com/sicknature-x/Sol-Warlock-Meteora-LP-Bot.git
-    cd Sol-Warlock-Meteora-LP-Bot/sol-lp-bot
+    git clone https://github.com/woeatomo/sol-warlock.git
+    cd sol-warlock/sol-lp-bot
     npm ci --omit=dev
 
 ## 4. Isi file .env
@@ -112,7 +114,7 @@ URL trycloudflare berubah kalau tunnel di-restart, jadi ulangi langkah 1 dan 2 k
 
 ## Update dari versi lama (v1.0–v1.4)
 
-    cd ~/Sol-Warlock-Meteora-LP-Bot && git pull
+    cd ~/sol-warlock && git pull
     rsync -a --exclude '.env' --exclude 'paper/' --exclude 'node_modules/' ~/Sol-Warlock-Meteora-LP-Bot/sol-lp-bot/ ~/sol-lp-bot/
     cd ~/sol-lp-bot && npm ci --omit=dev
     pm2 restart all && pm2 status
