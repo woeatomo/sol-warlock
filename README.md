@@ -2,6 +2,16 @@
 
 Bot LP otomatis untuk Meteora DLMM. Default-nya mode PAPER (simulasi, tanpa uang asli), dikontrol lewat Telegram Mini App. Tidak pakai AI/LLM.
 
+
+## ⚠️ Versi patched di atas v1.8 (14 Nov 2026)
+Strategi, filter, dan semua default setelan **sama persis** dengan upstream v1.8. Yang diubah hanya biaya, kejujuran dry run, dan operasional:
+1. **Fee developer 0,5% dibuang.** Upstream memotong 50 bps di setiap swap live ke akun yang disamarkan base64; dry run tidak kena. Sekarang tanpa fee. Opsional `OWNER_FEE_BPS` + `OWNER_FEE_WALLET` (kosong = mati, maks 100 bps), berlaku sama di dry run dan live.
+2. **Jeda cek posisi dry run = live:** `POSITION_POLL_SEC` (default 30 detik). Scan kandidat tetap `POLL_SEC` (300). Upstream: dry run ~10 detik, live 300 detik.
+3. **Cek biaya non-refundable tidak lagi dilewati** untuk range lebar. `MAX_NONREFUND_SOL=0.001` = hanya pool yang bin array-nya sudah ada (`0` = cek mati).
+4. **Hemat RPC:** objek DLMM di-cache per pool, cek biaya bin array jalan paling akhir, log `RPC usage` tiap jam.
+5. **File PM2 ditambahkan:** `ecosystem.public.config.cjs` (dry run + mini app) dan `ecosystem.public-live.config.cjs` (live, dipanggil tombol Live ON). Jangan isi `PAPER`, `DRY_RUN`, `LIVE_CONFIRMED` di `.env`.
+6. Port mini app default `8797` (README upstream menulis 8787).
+
 ## Fitur
 - Screening pool (fee/TVL, bin step, umur pool, filter pump)
 - SL -20%, TP +20%, TP Emergency +10% (default ON)
@@ -66,8 +76,7 @@ Baris strategi dan filter biarkan saja, nanti bisa diubah dari menu Settings di 
 
 ## 5. Jalankan bot
 
-    pm2 start bot.js --name sol-lp-paper
-    pm2 start miniapp/server.js --name sol-lp-miniapp
+    pm2 start ecosystem.public.config.cjs
     pm2 save
     pm2 startup
     pm2 status
@@ -76,11 +85,11 @@ Baris strategi dan filter biarkan saja, nanti bisa diubah dari menu Settings di 
 Setelah `pm2 startup`, jalankan perintah yang ditampilkan supaya bot nyala lagi setelah VPS reboot. Semua proses di `pm2 status` harus "online".
 
 ## 6. Mini app (dashboard di Telegram)
-Mini app jalan di `127.0.0.1:8787`, dan Telegram butuh alamat https. Pakai Cloudflare tunnel gratis:
+Mini app jalan di `127.0.0.1:8797`, dan Telegram butuh alamat https. Pakai Cloudflare tunnel gratis:
 
     curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
     chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
-    pm2 start "cloudflared tunnel --url http://127.0.0.1:8787" --name miniapp-tunnel
+    pm2 start "cloudflared tunnel --url http://127.0.0.1:8797" --name miniapp-tunnel
     pm2 logs miniapp-tunnel --lines 20
 
 1. Cari URL `https://xxxx.trycloudflare.com` di log, salin ke `MINIAPP_URL=` di `.env`, lalu `pm2 restart all`.

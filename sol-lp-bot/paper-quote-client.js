@@ -12,7 +12,8 @@ function create({fetch:request=globalThis.fetch,now=()=>Date.now(),wait=ms=>new 
   if(now()<blockedUntil)return resultError('Jupiter cooldown; using on-chain mark');
   lastStart=now();
   try{
-   const qs=`/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${raw}&slippageBps=${slippageBps}`;
+   const feeBps=require('./swap-route-config').paperFeeBps();   // PATCH: dry-run quotes carry the same owner fee as live (0 by default)
+   const qs=`/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${raw}&slippageBps=${slippageBps}`+(feeBps>0?`&platformFeeBps=${feeBps}`:'');
    const call=k=>request((k?'https://api.jup.ag':'https://lite-api.jup.ag')+qs,k?{signal:AbortSignal.timeout(15000),headers:{'x-api-key':k}}:{signal:AbortSignal.timeout(15000)});
    let k=apiKey(),r=await call(k);
    if(k&&(r.status===401||r.status===403)){onKeyRejected();k='';r=await call('');}   // rejected key: fall back to the keyless host once

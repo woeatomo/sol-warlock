@@ -8,7 +8,7 @@ const ROOT = __dirname;
 // (node record-live-verification.js <feature> "what was tested + tx signatures"). Writing the code is never enough to open Go Live.
 const REQUIRED_VERIFICATIONS = ['entry-geometry', 'swapback', 'usdc-quoted-pools', 'oor-reposition', 'reshape-compound', 'multi-position'];
 function verifications(root) { try { return JSON.parse(fs.readFileSync(path.join(root, 'live-verification.json'), 'utf8')).features || {}; } catch (e) { return {}; } }
-const INFRA_OK = new Set(['DRY_RUN', 'PAPER', 'RPC', 'TX_FEE_SOL', 'SLIPPAGE_PCT', 'PRIORITY_MICROLAMPORTS', 'PAPER_USDC', 'PAPER_VIRTUAL_SOL', 'PAPER_DAYS', 'ONCE', 'POLL_SEC']);
+const INFRA_OK = new Set(['DRY_RUN', 'PAPER', 'RPC', 'TX_FEE_SOL', 'SLIPPAGE_PCT', 'PRIORITY_MICROLAMPORTS', 'PAPER_USDC', 'PAPER_VIRTUAL_SOL', 'PAPER_DAYS', 'ONCE', 'POLL_SEC', 'POSITION_POLL_SEC']);   // PATCH: POSITION_POLL_SEC is one shared value used by both loops
 // Divergences that exist TODAY and are known (12 Nov 2026). New ones fail the test; fixed ones must be removed from this list.
 const KNOWN_DEBT = [
   'unverified:entry-geometry', 'unverified:swapback', 'unverified:usdc-quoted-pools', 'unverified:oor-reposition', 'unverified:reshape-compound', 'unverified:multi-position',   // each needs a supervised small live test recorded by Tuan

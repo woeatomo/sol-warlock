@@ -87,7 +87,9 @@ const CFG = {
   PAPER, DRY_RUN: DRY,
   ONCE: process.argv.includes('--once'),
   RPC: require('./rpc-config').url(),   // custom SOLANA_RPC_URL > HELIUS_API_KEY > public endpoint
-  POLL_SEC: +(process.env.POLL_SEC || 300),
+  POLL_SEC: +(process.env.POLL_SEC || 300),   // scan for new candidates (dry run + live)
+  // PATCH: how often OPEN positions are re-valued and the exit rules run. One value for dry run and live (upstream: ~10 s dry run vs 300 s live).
+  POSITION_POLL_SEC: Math.max(10, +(process.env.POSITION_POLL_SEC || 30)),
   POSITION_SOL: +(process.env.POSITION_SOL || 2),
   POSITION_USD: process.env.POSITION_USD ? +process.env.POSITION_USD : 0,
   RESERVE_SOL: +(process.env.RESERVE_SOL || 0.15),
@@ -144,7 +146,7 @@ const now = () => new Date().toISOString();
 const wib = (d = new Date()) => new Date(d).toLocaleString('sv-SE', { timeZone: 'Asia/Jakarta' }) + ' WIB';
 
 function log(msg) {
-  msg=swapRoute.cleanMessage(require('./env-config').redact(msg));
+  msg=require('./env-config').redact(msg);
   const tag = CFG.PAPER ? ' [PAPER]' : (CFG.DRY_RUN ? ' [DRY]' : '');
   const l = `[${wib()}]${tag} ${msg}`;
   console.log(l);
@@ -192,6 +194,22 @@ function saveState(s, file) {
 }
 
 const conn = new Connection(CFG.RPC, 'confirmed');
+// PATCH: count RPC requests and log them every hour, so POSITION_POLL_SEC / POLL_SEC can be tuned to the RPC plan.
+const rpcStats = { n: 0, since: Date.now(), byMethod: {} };
+for (const fn of ['_rpcRequest', '_rpcBatchRequest']) {
+  const orig = conn[fn];
+  if (typeof orig !== 'function') continue;
+  conn[fn] = function (method) {
+    const calls = fn === '_rpcBatchRequest' && Array.isArray(method) ? method : [{ methodName: method }];
+    for (const c of calls) { rpcStats.n++; const k = c.methodName || String(method); rpcStats.byMethod[k] = (rpcStats.byMethod[k] || 0) + 1; }
+    return orig.apply(this, arguments);
+  };
+}
+setInterval(() => {
+  const h = (Date.now() - rpcStats.since) / 3.6e6, top = Object.entries(rpcStats.byMethod).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => k + '=' + v).join(' ');
+  try { log(`RPC usage: ${rpcStats.n} requests in ${h.toFixed(2)} h (~${Math.round(rpcStats.n / h * 24 * 30)}/month at this rate); top: ${top}`); } catch { /* log not ready */ }
+  rpcStats.n = 0; rpcStats.since = Date.now(); rpcStats.byMethod = {};
+}, 3600_000).unref();
 let wallet = null; // only set in live mode
 const USER_PUB = REAL_WALLET ? new PublicKey(REAL_WALLET) : PublicKey.default;   // placeholder for unsigned paper tx builds when no wallet is stored
 
@@ -355,6 +373,19 @@ async function top10Hold(mint, supply, exclude = []) {
   }
 }
 
+// PATCH: reuse one DLMM instance per pool and refresh it (fewer RPC calls than DLMM.create on every poll). Falls back to DLMM.create.
+const dlmmCache = new Map();
+async function getDlmm(pool) {
+  const key = String(pool), hit = dlmmCache.get(key);
+  if (hit && Date.now() - hit.t < 10 * 60_000 && typeof hit.dlmm.refetchStates === 'function') {
+    try { await hit.dlmm.refetchStates(); return hit.dlmm; } catch (e) { dlmmCache.delete(key); }
+  }
+  const dlmm = await DLMM.create(conn, new PublicKey(key));
+  dlmmCache.set(key, { dlmm, t: Date.now() });
+  if (dlmmCache.size > 50) dlmmCache.delete(dlmmCache.keys().next().value);
+  return dlmm;
+}
+
 async function fetchPool(address) {
   return getJSON(`https://dlmm.datapi.meteora.ag/pools/${address}`, {}, 3);
 }
@@ -458,7 +489,6 @@ async function performScan(policy,opts={}) {
     {const cooldown=entryPolicy.cooldownReason(recentHistory,p.address,policy.REOPEN_COOLDOWN_MIN);if(cooldown&&skipSoft(p,tag,cooldown))continue;}
     if (ff.tvlDrop) { const ev = tvlDrop.evaluatePool(p, recentEntries, policy.TVL_DROP_MAX_PCT ?? 45); if (!ev.ok && skipSoft(p, tag, ev.why)) continue; }
     if (ff.oldDump && policy.OLD_TOKEN_MODE === 'BLOCK_ALL') { const ot = antirug.evaluateOldToken(Number(p.created_at) > 0 ? ageH : null, policy.OLD_DUMP_MIN_AGE_H ?? 400); if (!ot.ok && skipSoft(p, tag, ot.why)) continue; }
-    {p.entryCostEstimate=await screenEntryCost(p,policy);const why=entryCost.rejection(p.entryCostEstimate,policy.MAX_NONREFUND_SOL??.05);if(why&&skipSoft(p,tag,why))continue;}
     let pvp = null;
     if (pvpMode !== 'OFF') {
       const ds = await dexSearchPairs(p.token_x?.symbol || p.name?.split('-')[0]);
@@ -519,6 +549,8 @@ async function performScan(policy,opts={}) {
         top = { frac: ev.top10Frac, devFrac: ev.devFrac };
       }
     }
+    // PATCH: the entry-cost check (several RPC calls) runs LAST, only for pools that passed every cheaper filter. Same set of filters.
+    {p.entryCostEstimate=await screenEntryCost(p,policy);const why=entryCost.rejection(p.entryCostEstimate,policy.MAX_NONREFUND_SOL??.05);if(why&&skipSoft(p,tag,why))continue;}
     log(`  PASS ${tag} pump1h=${pu == null ? 'off' : (pu * 100).toFixed(1) + '%'} pump24h=${pu24 == null ? 'off' : (pu24 * 100).toFixed(1) + '%'}${rcInfo ? ' rugScore=' + (rcInfo.scoreNorm ?? 'n/a') : ''}${ins ? ` insider=${ins.pct == null ? 'n/a' : ins.pct.toFixed(1) + '%'}` : ''}${pvp ? ` antiPvP=${pvp.twins.length ? 'kept(' + pvp.twins.length + ' kembar)' : 'ok'}` : ''}${top.frac != null ? ` top10=${(top.frac * 100).toFixed(1)}%` : ''}${top.devFrac != null ? ` dev=${(top.devFrac * 100).toFixed(1)}%` : ''}`);
     picks.push({ ...p, pump1h: pu, pump24h: pu24, top10: top.frac, devHold: top.devFrac, entryInsiderPct: ins ? ins.pct : (report && !report.error ? antirug.evaluateInsiders(report, policy).pct : null) });
     // Check all basic candidates for honest pass/reject UI; auto entry still uses picks.slice(0,1).
@@ -1121,7 +1153,7 @@ function applyPaperSettings({ logAlways = false } = {}) {
 
 // ---------- paper valuation / fees / open / reshape / close ----------
 async function fetchMarket(pool, minBinId, maxBinId) {
-  const dlmm = await DLMM.create(conn, new PublicKey(pool));
+  const dlmm = await getDlmm(pool);
   const active = await dlmm.getActiveBin();
   const price = +dlmm.fromPricePerLamport(+active.price);
   const minB = Math.min(minBinId, active.binId - 2);
@@ -1992,7 +2024,7 @@ async function liveOpenUsdcPool({ p, state, opts, policy, dlmm, active, binStep,
 }
 
 async function liveValuation(pos) {
-  const dlmm = await DLMM.create(conn, new PublicKey(pos.pool));
+  const dlmm = await getDlmm(pos.pool);
   const p = await dlmm.getPosition(new PublicKey(pos.position));
   const active = await dlmm.getActiveBin();
   const price = +dlmm.fromPricePerLamport(+active.price);
@@ -2257,6 +2289,9 @@ async function liveCycle(state) {
   }
   if (state.positions.length >= CFG.MAX_POSITIONS) { await writeLiveStatusPointer(state, { lives }); return false; }   // slots full, like the dry run
   if (state.positions.some(p => exitQuotePriority(p) >= 4)) { log('a position is about to exit: not opening a new one this poll (same gate as the dry run)'); await writeLiveStatusPointer(state, { lives }); return false; }
+  // PATCH: positions are checked every POSITION_POLL_SEC; new candidates are still scanned only every POLL_SEC (RPC budget).
+  if (Date.now() - (liveCycle.lastScanAt || 0) < CFG.POLL_SEC * 1000) { await writeLiveStatusPointer(state, { lives }); return false; }
+  liveCycle.lastScanAt = Date.now();
   scan.liveHistory = state.history || []; scan.liveOpen = state.positions;   // same cooldown / TVL-drop inputs as the dry run, from live's own trades
   const picks = await scan();
   state.lastScan = { at: now(), fetched: scan.last?.fetched, basic: scan.last?.basic, rejects: scan.last?.rejects || null, candidates: picks.map((p) => ({ name: p.name, address: p.address, ftWindow: CFG.FT_WINDOW, ft: feeTvl(p), ft30m: feeTvl(p, '30m'), ft1h: feeTvl(p, '1h'), tvl: p.tvl, binStep: p.pool_config.bin_step, pump1h: p.pump1h, pump24h: p.pump24h, top10: p.top10 })) };
@@ -2373,7 +2408,7 @@ async function liveCycle(state) {
         try { telegram.maybeDailySummary(telegram.statusFromState(state)).catch(() => {}); } catch { /* ignore */ }
         if (paperStopRequested() || Date.now() >= Date.parse(state.meta.endsAt)) break;
         // Flat scans stay at 5 min; an open position refreshes inventory + active bin every ~10 sec.
-        if ((anyOpen(state) && i >= 1) || (scan.last?.at && scan.last.at!==state.lastScan?.at)) break;
+        if ((anyOpen(state) && (i + 1) * 5 >= CFG.POSITION_POLL_SEC) || (scan.last?.at && scan.last.at!==state.lastScan?.at)) break;
       }
     }
     log('paper exit');
@@ -2391,6 +2426,8 @@ async function liveCycle(state) {
     for (let i = 0; i < CFG.POLL_SEC / 5; i++) {
       await sleep(5000);
       if (fs.existsSync(path.join(DIR, 'STOP'))) break;
+      // PATCH: open positions are re-checked every POSITION_POLL_SEC, exactly like the dry-run loop (upstream: full POLL_SEC = 5 min).
+      if (livePositions.list(state).length && (i + 1) * 5 >= CFG.POSITION_POLL_SEC) break;
     }
   }
   log('exit');
