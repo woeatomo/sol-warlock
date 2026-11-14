@@ -144,6 +144,10 @@ function publicStatus(paperDir) {
   out.activity = require('./activity').events(paperDir);
   out.lpAgentUrl = telegram.lpAgentLink();
   out.paused = settings.isPaused(paperDir);
+  // PATCH: monthly profit sweep history (dry run from paper/status.json, live from the bot's root status.json). Last 12 events each.
+  { const trim = s => (s && typeof s === 'object') ? { startedAt: s.startedAt || null, sweptSol: +s.sweptSol || 0, sweptUsdc: +s.sweptUsdc || 0, events: Array.isArray(s.events) ? s.events.slice(-12) : [] } : null;
+    let live = null; try { live = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'status.json'), 'utf8')).profitSweep; } catch { /* no live status yet */ }
+    out.profitSweep = { paper: trim(out.status && out.status.profitSweep), live: trim(live), enabled: String(process.env.PROFIT_SWEEP_MONTHLY ?? '1').trim() !== '0' }; }
   out.window = {
     startedWib: (out.config && out.config.startedWib) || (out.status && out.status.meta && out.status.meta.startedWib) || null,
     endsWib: (out.config && out.config.endsWib) || (out.status && out.status.meta && out.status.meta.endsWib) || null,

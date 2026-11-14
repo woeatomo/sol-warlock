@@ -228,6 +228,19 @@
     const n=Math.min(1399-upper,Number(values?.LOWER_BINS)>0?Number(values.LOWER_BINS):Math.ceil(Math.log(1/(1-down/100))/Math.log(1+step/1e4))),coverage=100*(1-Math.pow(1+step/1e4,-n));
     return n+upper>=50&&coverage>=49-1e-9?'DILEWATI: ≥50 bin & target range 50% (toleransi 49%); tidak menunggu rent RPC':'';
   }
+  // PATCH: monthly profit sweep card (SOL capital). Shown when SOL capital is active or anything was ever swept.
+  function renderSweep(ps,isSolCapital){
+    const el=$('sweep-card');if(!el)return;
+    const part=(label,s)=>{
+      if(!s||!(s.events||[]).length)return '';
+      const rows=s.events.slice().reverse().map(e=>`<div class="sweep-row"><span>${esc(e.month||'')}</span><span class="mono">${Number(e.sol||0).toFixed(4)} SOL</span><span class="mono pos">+${money(e.usdc)}</span></div>`).join('');
+      return `<div class="k">${esc(label)} · total ${Number(s.sweptSol||0).toFixed(4)} SOL → ${money(s.sweptUsdc)}</div>${rows}`;
+    };
+    const body=ps?part('DRY RUN',ps.paper)+part('LIVE',ps.live):'';
+    if(!body&&!isSolCapital){el.classList.add('hidden');return;}
+    el.classList.remove('hidden');
+    setMarkup(el,`<div class="summary-top"><span class="k">PROFIT DI-SWEEP KE USDC</span><span class="mode">${ps&&ps.enabled===false?'MATI':'BULANAN'}</span></div>${body||'<p class="meta">Belum ada sweep. Profit SOL yang terealisasi di-swap ke USDC pada awal bulan berikutnya (WIB); bulan rugi dibawa ke depan.</p>'}`);
+  }
   function renderStatus(payload) {
     lastPayload=payload;
     const link=payload.status?.lpAgentUrl;
@@ -255,6 +268,7 @@
     const pnlTile=(label,usd,sol)=>`<div class="pnl-stat"><div class="k">${label}</div><strong class="mono ${pnlClass(usd)}">${esc(signed(usd))}</strong>${isSolCapital?`<small class="${pnlClass(sol)}">${esc(solPnl(sol))}</small>`:''}</div>`;
     setMarkup($('status-body'), `<div class="summary-top"><span class="k">EQUITY SAAT INI</span><span class="mode">PAPER · N5</span></div><div class="hero-value mono">${isSolCapital?Number(stats.equitySol??0).toFixed(6):money(equityNow)} <span>${capitalUnit}</span><small class="pnl-usd">${isSolCapital?money(equityNow):Number(stats.equitySol??0).toFixed(6)+' SOL'}</small></div><div class="pnl-split">${pnlTile(isSolCapital?'Unrealized · posisi open':'Unrealized · posisi open (USDC exit)',pnl.unrealizedUsd,pnl.unrealizedSol)}${pnlTile('Realized · sudah ditutup',pnl.realizedUsd,pnl.realizedSol)}</div><p class="meta pnl-note">Unrealized = estimasi exit seluruh posisi open ke USDC (= jumlah "PnL USDC (exit)" di kartu; PnL quote SOL di kartu tidak memasukkan efek naik/turun harga SOL). Realized = semua history termasuk arsip${stats.archivedCount?' ('+stats.archivedCount+' posisi arsip '+signed(stats.archivedPnlUsd)+')':''}. Equity = modal + realized + unrealized.${isSolCapital?' SOL: net modal SOL; posisi USDC ekuivalen SOL pada harga valuasi/close.':''}</p><div class="summary-grid">${tile('Posisi',slotCount+'/'+maxPositions)}${tile('Saldo bebas',isSolCapital?Number(stats.freeCapitalSol||0).toFixed(6)+' SOL':money(freeCash))}${tile('Modal disetor',isSolCapital?Number(stats.totalDepositedSol||0).toFixed(6)+' SOL':money(deposited))}${tile('Nilai semua posisi',money(stats.positionValueUsd??(numeric(equityNow)&&numeric(freeCash)?equityNow-freeCash:null)))}${tile('PnL posisi open (quote → USD)',signed(stats.quotePnlTotals?.usd),pnlClass(stats.quotePnlTotals?.usd))}${tile('PnL equity ('+capitalUnit+')',isSolCapital?(numeric(stats.equityPnlSol)?(+stats.equityPnlSol>=0?'+':'−')+Math.abs(+stats.equityPnlSol).toFixed(6)+' SOL':'—'):signed(total),pnlClass(isSolCapital?stats.equityPnlSol:total))}</div><p class="meta">${Object.entries(stats.quotePnlTotals?.quotes||{}).map(([q,n])=>esc(q+'-pool: '+(+n>=0?'+':'−')+Math.abs(n).toFixed(q==='SOL'?4:2)+' '+q)).join(' · ')}<br>Equity = saldo bebas + nilai seluruh posisi, termasuk buffer/rent yang bisa kembali.<br>PnL quote pool ≠ PnL equity. Aturan exit mengikuti aset modal saat entry, bukan setting terbaru.${isSolCapital?'<br>Basis deposit SOL direbase dari deposit USD saat fitur diaktifkan; bukan harga deposit SOL historis.':''}</p><div class="summary-bottom"><span><b class="${payload.paused?'negative':'positive'}">●</b> ${payload.paused?'Paper dipause':'Dry run berjalan'}</span><span>Live tidak aktif</span></div>`);
     $('funding-form').classList.toggle('hidden',!paperAllowed);renderRuns(st.runs,deposited,paperAllowed,slotCount,freeCash);
+    renderSweep(st.profitSweep,isSolCapital);
     $('funding-stats').textContent=`Modal disetor ${money(deposited)} · saldo bebas ${isSolCapital?Number(stats.freeCapitalSol||0).toFixed(6)+' SOL (top-up USDC dikonversi) ':money(st.capital?.virtualUsdc??stats.virtualUsdc)} · ${st.capital?.pending||0} top-up antre. Budget entry ${payload.values?.POSITION_USDC>0?money(payload.values.POSITION_USDC)+' termasuk gas':'saldo bebas dibagi slot kosong (termasuk gas), tetap cap 5% TVL'}.`;
     const command=(st.commands?.last||[]).at(-1);if(command)$('funding-result').textContent=`Aksi terakhir: ${command.type} · ${command.result?.ok?'berhasil':command.result?.error||'antre'}`;
     $('position-count').textContent=`Posisi ${slotCount}/${maxPositions}`;
